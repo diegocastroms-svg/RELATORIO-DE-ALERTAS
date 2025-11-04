@@ -1,6 +1,6 @@
-# main.py — OURO ROTA DIÁRIA (V21.8 — EMA9 x MA20 4H CRUZAMENTO REAL)
-# Marca 📊 apenas se EMA9 cruzar e sustentar acima da MA20 (4h)
-# Mantém toda a estrutura e lógica anterior
+# main.py — OURO ROTA DIÁRIA (V21.9 — EMA9 x MA20 4H CRUZAMENTO REAL 0.15%)
+# Apenas marca 📊 quando há cruzamento confirmado e sustentado da EMA9 sobre a MA20 (4h)
+# Mantém toda a estrutura original e execução automática no deploy
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -10,7 +10,7 @@ from flask import Flask
 BINANCE_HTTP = "https://api.binance.com"
 TOP_N = 120
 REQ_TIMEOUT = 10
-VERSION = "OURO ROTA DIÁRIA V21.8 — EMA9 x MA20 4H CRUZAMENTO REAL"
+VERSION = "OURO ROTA DIÁRIA V21.9 — EMA9 x MA20 4H CRUZAMENTO REAL 0.15%"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -52,34 +52,31 @@ def ema_series(values, n):
         out.append(e)
     return out
 
-# ---------------- TENDÊNCIA 4H (EMA9 x MA20 CRUZAMENTO REAL) ----------------
+# ---------------- TENDÊNCIA 4H (EMA9 x MA20 CRUZAMENTO REAL CONFIRMADO) ----------------
 def tendencia_4h(candles):
     try:
         closes = [float(k[4]) for k in candles if len(k) >= 5]
         if len(closes) < 100:
             return False
 
-        # EMA9
         ema_vals = ema_series(closes, 9)
-        # MA20 simples (média aritmética)
         ma20_vals = [sum(closes[i-20:i]) / 20 for i in range(20, len(closes)+1)]
 
-        # alinhar comprimentos
         diff = len(ema_vals) - len(ma20_vals)
         if diff > 0:
             ema_vals = ema_vals[diff:]
         elif diff < 0:
             ma20_vals = ma20_vals[-len(ema_vals):]
 
-        # últimos 3 valores para confirmar cruzamento
         e9_prev2, e9_prev, e9_now = ema_vals[-3], ema_vals[-2], ema_vals[-1]
         ma_prev2, ma_prev, ma_now = ma20_vals[-3], ma20_vals[-2], ma20_vals[-1]
+        price_now = closes[-1]
 
-        # cruzamento real (EMA9 cruza MA20 de baixo pra cima e se mantém)
-        cruzou = (e9_prev2 < ma_prev2) and (e9_prev > ma_prev) and (e9_now > ma_now)
-        confirmacao = (e9_now > ma_now) and (e9_prev > ma_prev)
+        # cruzamento real de baixo pra cima e distância mínima de 0.15%
+        cruzou = (e9_prev2 < ma_prev2) and (e9_prev < ma_prev) and (e9_now > ma_now)
+        dist = (e9_now - ma_now) / price_now
 
-        return cruzou and confirmacao
+        return cruzou and dist > 0.0015  # 0.15%
     except Exception as e:
         print(f"[tendencia_4h ERRO] {e}")
         return False
@@ -150,21 +147,6 @@ def calc_prob(candles, ch24):
         print(f"[calc_prob ERRO] {e}")
         return 0.0, "NEUT", 0, "→", "→", "→", "→"
 
-# ---------------- TENDÊNCIA 1H ----------------
-def tendencia_1h(candles):
-    try:
-        closes = [float(k[4]) for k in candles]
-        if len(closes) < 40:
-            return False
-        ema9 = ema(closes[-40:], 9)
-        ema20 = ema(closes[-40:], 20)
-        ema12 = ema(closes[-40:], 12)
-        ema26 = ema(closes[-40:], 26)
-        macd = ema12 - ema26
-        return ema9 > ema20 and macd > 0
-    except:
-        return False
-
 # ---------------- BINANCE ----------------
 async def get_klines(session, symbol, interval="1h", limit=48):
     url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -199,7 +181,7 @@ async def gerar_relatorio():
         inicio = time.time()
         pares = await get_top_usdt_symbols(session)
 
-        reversao, continuacao, tendencia_1h_list = [], [], []
+        reversao, continuacao, tendencia_4h_list = [], [], []
 
         for s, vol, change in pares:
             kl_1h = await get_klines(session, s, "1h", 60)
@@ -209,8 +191,8 @@ async def gerar_relatorio():
             prob, regime, rsi, ema_slope, tendencia, vol_tag, mom_tag = calc_prob(kl_1h, change)
             diario_tag = "📊" if conf_4h else "—"
 
-            if tendencia_1h(kl_1h):
-                tendencia_1h_list.append(s)
+            if conf_4h:
+                tendencia_4h_list.append(s)
 
             if regime == "REV":
                 reversao.append((s, prob, change, rsi, ema_slope, tendencia, vol_tag, mom_tag, diario_tag))
@@ -239,16 +221,16 @@ async def gerar_relatorio():
         texto += f"\n📊 Total analisado: {len(pares)} pares\n"
         texto += f"\n🟢 Relatório gerado automaticamente no deploy\n"
 
-        if tendencia_1h_list:
-            texto += "\n💠 <b>Moedas com tendência no 4h (EMA9>MA20 - Cruzamento confirmado):</b>\n"
-            texto += ", ".join(tendencia_1h_list)
+        if tendencia_4h_list:
+            texto += "\n💠 <b>Moedas com tendência real no 4h (EMA9>MA20 + 0.15% confirmada):</b>\n"
+            texto += ", ".join(tendencia_4h_list)
         else:
             texto += "\n💠 Nenhuma moeda com tendência clara no 4h."
 
         await tg(session, texto)
         print(f"[{now_br()}] RELATÓRIO ENVIADO COM SUCESSO ({tempo}s)")
 
-# ---------------- EXECUÇÃO IMEDIATA ----------------
+# ---------------- EXECUÇÃO ----------------
 async def agendar_execucao():
     print(f"[{now_br()}] OURO ROTA DIÁRIA ATIVO — gerando relatório imediato no deploy.")
     await gerar_relatorio()
