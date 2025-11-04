@@ -1,6 +1,6 @@
-# main.py — OURO ROTA DIÁRIA (COMPLETO DEFINITIVO 20h)
+# main.py — OURO ROTA DIÁRIA (V20.3 PROBABILIDADE + EXECUÇÃO IMEDIATA)
 # Relatório diário automático: probabilidade + variação 24h + direção
-# Totalmente automático — sem ajustes manuais
+# Executa automaticamente ao fazer deploy (sem esperar 20h)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -10,7 +10,7 @@ from flask import Flask
 BINANCE_HTTP = "https://api.binance.com"
 TOP_N = 120
 REQ_TIMEOUT = 10
-VERSION = "OURO ROTA DIÁRIA COMPLETO 20h"
+VERSION = "OURO ROTA DIÁRIA V20.3 — PROBABILIDADE + EXECUÇÃO IMEDIATA"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -19,7 +19,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} — Relatório diário completo às 20h (BR)", 200
+    return f"{VERSION} — relatório gerado automaticamente no deploy", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -35,15 +35,57 @@ async def tg(session, text: str):
     except Exception as e:
         print(f"[TG ERRO] {e}")
 
+# ---------------- CÁLCULO DE PROBABILIDADE ----------------
 def calc_prob(candles):
     try:
         closes = [float(k[4]) for k in candles]
-        if len(closes) < 2:
+        highs = [float(k[2]) for k in candles]
+        lows = [float(k[3]) for k in candles]
+        volumes = [float(k[5]) for k in candles]
+        if len(closes) < 20:
             return 0
-        diffs = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
-        ups = sum(1 for d in diffs if d > 0)
-        return ups / len(diffs)
-    except:
+
+        # RSI simplificado (14 períodos)
+        deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+        gains = [d for d in deltas if d > 0]
+        losses = [-d for d in deltas if d < 0]
+        avg_gain = sum(gains[-14:]) / 14 if len(gains) >= 14 else 0.001
+        avg_loss = sum(losses[-14:]) / 14 if len(losses) >= 14 else 0.001
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+
+        # Direção de tendência (EMA9 vs EMA20)
+        def ema(values, n):
+            k = 2 / (n + 1)
+            ema_val = values[0]
+            for v in values[1:]:
+                ema_val = v * k + ema_val * (1 - k)
+            return ema_val
+
+        ema9 = ema(closes[-20:], 9)
+        ema20 = ema(closes[-20:], 20)
+        tendencia = 1 if ema9 > ema20 else -1
+
+        # Força de volume (última média x atual)
+        vol_med = sum(volumes[-10:]) / 10
+        vol_force = volumes[-1] / vol_med if vol_med > 0 else 1
+
+        # Probabilidade composta (padrão OURO)
+        prob = 0
+        if rsi < 35 and tendencia == -1 and vol_force > 1.2:
+            prob = 0.85  # reversão provável
+        elif rsi > 55 and tendencia == 1 and vol_force > 1:
+            prob = 0.75  # continuação provável
+        elif 45 <= rsi <= 55:
+            prob = 0.5  # neutro
+        elif rsi < 25:
+            prob = 0.9  # repique forte provável
+        else:
+            prob = 0.3  # baixa probabilidade
+
+        return prob
+    except Exception as e:
+        print(f"[calc_prob ERRO] {e}")
         return 0
 
 # ---------------- BINANCE ----------------
@@ -102,19 +144,16 @@ async def gerar_relatorio():
             texto += f"{direcao} {s}: {p*100:.1f}% | {ch:+.2f}% 24h\n"
 
         texto += f"\n📈 Total analisado: {len(resultados)} pares\n"
-        texto += f"\n🟢 Execução automática às 20h (BR)\n"
+        texto += f"\n🟢 Relatório gerado automaticamente no deploy\n"
         await tg(session, texto)
         print(f"[{now_br()}] RELATÓRIO ENVIADO COM SUCESSO")
 
-# ---------------- AGENDAMENTO ----------------
+# ---------------- EXECUÇÃO IMEDIATA ----------------
 async def agendar_execucao():
-    print(f"[{now_br()}] OURO ROTA DIÁRIA ATIVO — aguardando 20h para gerar o relatório diário.")
+    print(f"[{now_br()}] OURO ROTA DIÁRIA ATIVO — gerando relatório imediato no deploy.")
+    await gerar_relatorio()
     while True:
-        agora = datetime.utcnow() - timedelta(hours=3)
-        if agora.hour == 20 and agora.minute == 0:
-            await gerar_relatorio()
-            await asyncio.sleep(60)
-        await asyncio.sleep(30)
+        await asyncio.sleep(3600)  # mantém o loop ativo sem repetir
 
 # ---------------- MAIN ----------------
 def start_bot():
