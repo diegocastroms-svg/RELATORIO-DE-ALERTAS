@@ -1,6 +1,6 @@
-# main.py — OURO ROTA DIÁRIA (V21.4 TENDÊNCIA 4H REAL + CRUZAMENTO)
-# Ajusta a lógica de confluência 4h: exige cruzamento real e MACD crescente
-# Mantém todo o resto idêntico às versões anteriores
+# main.py — OURO ROTA DIÁRIA (V21.6 — 4H SOMENTE CRUZAMENTO)
+# Detecta tendência apenas por cruzamento real EMA9>EMA20 (sem MACD)
+# Mantém toda a estrutura anterior
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -10,7 +10,7 @@ from flask import Flask
 BINANCE_HTTP = "https://api.binance.com"
 TOP_N = 120
 REQ_TIMEOUT = 10
-VERSION = "OURO ROTA DIÁRIA V21.4 — TENDÊNCIA 4H REAL + CRUZAMENTO"
+VERSION = "OURO ROTA DIÁRIA V21.6 — 4H SOMENTE CRUZAMENTO"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -43,32 +43,32 @@ def ema(values, n):
         e = v * k + e * (1 - k)
     return e
 
-# ---------------- TENDÊNCIA 4H REAL + CRUZAMENTO ----------------
+def ema_series(values, n):
+    k = 2 / (n + 1)
+    e = None
+    out = []
+    for v in values:
+        e = v if e is None else (v * k + e * (1 - k))
+        out.append(e)
+    return out
+
+# ---------------- TENDÊNCIA 4H (SOMENTE CRUZAMENTO EMA9>EMA20) ----------------
 def tendencia_4h(candles):
     try:
         closes = [float(k[4]) for k in candles if len(k) >= 5]
-        if len(closes) < 60:
+        if len(closes) < 100:
             return False
 
-        # médias móveis atuais e anteriores
-        ema9_now = ema(closes[-40:], 9)
-        ema20_now = ema(closes[-40:], 20)
-        ema9_prev = ema(closes[-45:-5], 9)
-        ema20_prev = ema(closes[-45:-5], 20)
+        ema9 = ema_series(closes, 9)
+        ema20 = ema_series(closes, 20)
 
-        # MACD atual e anterior
-        ema12_now = ema(closes[-40:], 12)
-        ema26_now = ema(closes[-40:], 26)
-        ema12_prev = ema(closes[-45:-5], 12)
-        ema26_prev = ema(closes[-45:-5], 26)
-        macd_now = ema12_now - ema26_now
-        macd_prev = ema12_prev - ema26_prev
+        # últimos 3 candles para confirmar cruzamento e evitar falsos positivos
+        e9_prev2, e9_prev, e9_now = ema9[-3], ema9[-2], ema9[-1]
+        e20_prev2, e20_prev, e20_now = ema20[-3], ema20[-2], ema20[-1]
 
-        # cruzamento recente e força de tendência
-        cruzamento = ema9_prev < ema20_prev and ema9_now > ema20_now
-        tendencia_alta = ema9_now > ema20_now and macd_now > 0 and macd_now > macd_prev
-
-        return cruzamento and tendencia_alta
+        # cruzamento real e sustentado
+        cruzamento = (e9_prev2 < e20_prev2) and (e9_prev > e20_prev) and (e9_now > e20_now)
+        return cruzamento
     except Exception as e:
         print(f"[tendencia_4h ERRO] {e}")
         return False
@@ -192,7 +192,7 @@ async def gerar_relatorio():
 
         for s, vol, change in pares:
             kl_1h = await get_klines(session, s, "1h", 60)
-            kl_4h = await get_klines(session, s, "4h", 100)
+            kl_4h = await get_klines(session, s, "4h", 200)
 
             conf_4h = tendencia_4h(kl_4h)
             prob, regime, rsi, ema_slope, tendencia, vol_tag, mom_tag = calc_prob(kl_1h, change)
@@ -229,7 +229,7 @@ async def gerar_relatorio():
         texto += f"\n🟢 Relatório gerado automaticamente no deploy\n"
 
         if tendencia_1h_list:
-            texto += "\n💠 <b>Moedas com tendência no 4h (EMA9>EMA20 e MACD+ com cruzamento):</b>\n"
+            texto += "\n💠 <b>Moedas com tendência no 4h (EMA9>EMA20 - Cruzamento confirmado):</b>\n"
             texto += ", ".join(tendencia_1h_list)
         else:
             texto += "\n💠 Nenhuma moeda com tendência clara no 4h."
