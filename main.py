@@ -1,6 +1,6 @@
-# main.py — OURO ROTA DIÁRIA (V21.0 TENDÊNCIA 1H)
-# Mantém toda a estrutura da V20.8
-# Adiciona seção extra com lista de moedas com tendência no 1h (EMA9>EMA20 e MACD positivo)
+# main.py — OURO ROTA DIÁRIA (V21.2 CONFLUÊNCIA 4H CORRIGIDA)
+# Mantém tudo igual à V21.0
+# Ajusta a confluência para o gráfico 4h e exige MACD positivo e crescente
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -10,7 +10,7 @@ from flask import Flask
 BINANCE_HTTP = "https://api.binance.com"
 TOP_N = 120
 REQ_TIMEOUT = 10
-VERSION = "OURO ROTA DIÁRIA V21.0 — TENDÊNCIA 1H"
+VERSION = "OURO ROTA DIÁRIA V21.2 — CONFLUÊNCIA 4H CORRIGIDA"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -43,19 +43,24 @@ def ema(values, n):
         e = v * k + e * (1 - k)
     return e
 
-# ---------------- TENDÊNCIA DIÁRIA ----------------
-def tendencia_diaria(candles):
+# ---------------- TENDÊNCIA 4H (substitui 1D) ----------------
+def tendencia_4h(candles):
     try:
         closes = [float(k[4]) for k in candles if len(k) >= 5]
-        if len(closes) < 40:
+        if len(closes) < 50:
             return False
-        ema9 = ema(closes[-40:], 9)
-        ema20 = ema(closes[-40:], 20)
-        ema12 = ema(closes[-40:], 12)
-        ema26 = ema(closes[-40:], 26)
+        ema9 = ema(closes[-50:], 9)
+        ema20 = ema(closes[-50:], 20)
+        ema12 = ema(closes[-50:], 12)
+        ema26 = ema(closes[-50:], 26)
         macd = ema12 - ema26
-        return ema9 > ema20 and macd > 0
-    except:
+        ema12_prev = ema(closes[-51:-1], 12)
+        ema26_prev = ema(closes[-51:-1], 26)
+        macd_prev = ema12_prev - ema26_prev
+        # confluência só se MACD positivo e crescente + EMA9 acima da EMA20
+        return ema9 > ema20 and macd > 0 and macd > macd_prev
+    except Exception as e:
+        print(f"[tendencia_4h ERRO] {e}")
         return False
 
 # ---------------- PROBABILIDADE (1h) ----------------
@@ -178,13 +183,12 @@ async def gerar_relatorio():
 
         for s, vol, change in pares:
             kl_1h = await get_klines(session, s, "1h", 60)
-            kl_1d = await get_klines(session, s, "1d", 100)
+            kl_4h = await get_klines(session, s, "4h", 100)
 
-            diario_confirma = tendencia_diaria(kl_1d)
+            conf_4h = tendencia_4h(kl_4h)
             prob, regime, rsi, ema_slope, tendencia, vol_tag, mom_tag = calc_prob(kl_1h, change)
-            diario_tag = "📊" if diario_confirma else "—"
+            diario_tag = "📊" if conf_4h else "—"
 
-            # lista adicional de tendência 1h
             if tendencia_1h(kl_1h):
                 tendencia_1h_list.append(s)
 
@@ -215,7 +219,6 @@ async def gerar_relatorio():
         texto += f"\n📊 Total analisado: {len(pares)} pares\n"
         texto += f"\n🟢 Relatório gerado automaticamente no deploy\n"
 
-        # nova lista de tendência 1h
         if tendencia_1h_list:
             texto += "\n💠 <b>Moedas com tendência no 1h (EMA9>EMA20 e MACD+):</b>\n"
             texto += ", ".join(tendencia_1h_list)
