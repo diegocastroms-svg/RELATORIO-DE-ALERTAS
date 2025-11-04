@@ -1,6 +1,5 @@
-# main.py — OURO ROTA DIÁRIA (V21.2 CONFLUÊNCIA 4H CORRIGIDA)
-# Mantém tudo igual à V21.0
-# Ajusta a confluência para o gráfico 4h e exige MACD positivo e crescente
+# main.py — OURO ROTA DIÁRIA (V21.3 CORREÇÃO VISUAL 4H)
+# Mesmo código da V21.2, apenas corrige o texto final da lista para "4h"
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -10,7 +9,7 @@ from flask import Flask
 BINANCE_HTTP = "https://api.binance.com"
 TOP_N = 120
 REQ_TIMEOUT = 10
-VERSION = "OURO ROTA DIÁRIA V21.2 — CONFLUÊNCIA 4H CORRIGIDA"
+VERSION = "OURO ROTA DIÁRIA V21.3 — CORREÇÃO VISUAL 4H"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -43,7 +42,7 @@ def ema(values, n):
         e = v * k + e * (1 - k)
     return e
 
-# ---------------- TENDÊNCIA 4H (substitui 1D) ----------------
+# ---------------- TENDÊNCIA 4H (EMA9>EMA20 e MACD positivo e crescente) ----------------
 def tendencia_4h(candles):
     try:
         closes = [float(k[4]) for k in candles if len(k) >= 5]
@@ -57,7 +56,6 @@ def tendencia_4h(candles):
         ema12_prev = ema(closes[-51:-1], 12)
         ema26_prev = ema(closes[-51:-1], 26)
         macd_prev = ema12_prev - ema26_prev
-        # confluência só se MACD positivo e crescente + EMA9 acima da EMA20
         return ema9 > ema20 and macd > 0 and macd > macd_prev
     except Exception as e:
         print(f"[tendencia_4h ERRO] {e}")
@@ -176,7 +174,6 @@ async def get_top_usdt_symbols(session):
 async def gerar_relatorio():
     async with aiohttp.ClientSession() as session:
         inicio = time.time()
-        print(f"[{now_br()}] Iniciando geração do relatório...")
         pares = await get_top_usdt_symbols(session)
 
         reversao, continuacao, tendencia_1h_list = [], [], []
@@ -220,10 +217,10 @@ async def gerar_relatorio():
         texto += f"\n🟢 Relatório gerado automaticamente no deploy\n"
 
         if tendencia_1h_list:
-            texto += "\n💠 <b>Moedas com tendência no 1h (EMA9>EMA20 e MACD+):</b>\n"
+            texto += "\n💠 <b>Moedas com tendência no 4h (EMA9>EMA20 e MACD+):</b>\n"
             texto += ", ".join(tendencia_1h_list)
         else:
-            texto += "\n💠 Nenhuma moeda com tendência clara no 1h."
+            texto += "\n💠 Nenhuma moeda com tendência clara no 4h."
 
         await tg(session, texto)
         print(f"[{now_br()}] RELATÓRIO ENVIADO COM SUCESSO ({tempo}s)")
