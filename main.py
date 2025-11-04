@@ -1,6 +1,6 @@
-# main.py — OURO ROTA DIÁRIA (V20.7 CONFLUÊNCIA DIÁRIA)
-# Inclui tendência do gráfico diário (EMA9>EMA20 e MACD positivo)
-# Executa automaticamente no deploy
+# main.py — OURO ROTA DIÁRIA (V21.0 TENDÊNCIA 1H)
+# Mantém toda a estrutura da V20.8
+# Adiciona seção extra com lista de moedas com tendência no 1h (EMA9>EMA20 e MACD positivo)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -10,7 +10,7 @@ from flask import Flask
 BINANCE_HTTP = "https://api.binance.com"
 TOP_N = 120
 REQ_TIMEOUT = 10
-VERSION = "OURO ROTA DIÁRIA V20.7 — CONFLUÊNCIA DIÁRIA"
+VERSION = "OURO ROTA DIÁRIA V21.0 — TENDÊNCIA 1H"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -46,13 +46,13 @@ def ema(values, n):
 # ---------------- TENDÊNCIA DIÁRIA ----------------
 def tendencia_diaria(candles):
     try:
-        closes = [float(k[4]) for k in candles]
-        if len(closes) < 30:
+        closes = [float(k[4]) for k in candles if len(k) >= 5]
+        if len(closes) < 40:
             return False
-        ema9 = ema(closes[-30:], 9)
-        ema20 = ema(closes[-30:], 20)
-        ema12 = ema(closes[-30:], 12)
-        ema26 = ema(closes[-30:], 26)
+        ema9 = ema(closes[-40:], 9)
+        ema20 = ema(closes[-40:], 20)
+        ema12 = ema(closes[-40:], 12)
+        ema26 = ema(closes[-40:], 26)
         macd = ema12 - ema26
         return ema9 > ema20 and macd > 0
     except:
@@ -124,6 +124,21 @@ def calc_prob(candles, ch24):
         print(f"[calc_prob ERRO] {e}")
         return 0.0, "NEUT", 0, "→", "→", "→", "→"
 
+# ---------------- TENDÊNCIA 1H ----------------
+def tendencia_1h(candles):
+    try:
+        closes = [float(k[4]) for k in candles]
+        if len(closes) < 40:
+            return False
+        ema9 = ema(closes[-40:], 9)
+        ema20 = ema(closes[-40:], 20)
+        ema12 = ema(closes[-40:], 12)
+        ema26 = ema(closes[-40:], 26)
+        macd = ema12 - ema26
+        return ema9 > ema20 and macd > 0
+    except:
+        return False
+
 # ---------------- BINANCE ----------------
 async def get_klines(session, symbol, interval="1h", limit=48):
     url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -159,14 +174,20 @@ async def gerar_relatorio():
         print(f"[{now_br()}] Iniciando geração do relatório...")
         pares = await get_top_usdt_symbols(session)
 
-        reversao, continuacao = [], []
+        reversao, continuacao, tendencia_1h_list = [], [], []
 
         for s, vol, change in pares:
-            kl_1h = await get_klines(session, s, "1h", 48)
-            kl_1d = await get_klines(session, s, "1d", 50)
+            kl_1h = await get_klines(session, s, "1h", 60)
+            kl_1d = await get_klines(session, s, "1d", 100)
+
             diario_confirma = tendencia_diaria(kl_1d)
             prob, regime, rsi, ema_slope, tendencia, vol_tag, mom_tag = calc_prob(kl_1h, change)
             diario_tag = "📊" if diario_confirma else "—"
+
+            # lista adicional de tendência 1h
+            if tendencia_1h(kl_1h):
+                tendencia_1h_list.append(s)
+
             if regime == "REV":
                 reversao.append((s, prob, change, rsi, ema_slope, tendencia, vol_tag, mom_tag, diario_tag))
             elif regime == "CONT":
@@ -191,9 +212,15 @@ async def gerar_relatorio():
         texto += f"📈 {len(continuacao[:10])} continuações confirmadas\n"
         tempo = round(time.time() - inicio, 1)
         texto += f"⏱️ Tempo de análise: {tempo}s\n"
-
         texto += f"\n📊 Total analisado: {len(pares)} pares\n"
         texto += f"\n🟢 Relatório gerado automaticamente no deploy\n"
+
+        # nova lista de tendência 1h
+        if tendencia_1h_list:
+            texto += "\n💠 <b>Moedas com tendência no 1h (EMA9>EMA20 e MACD+):</b>\n"
+            texto += ", ".join(tendencia_1h_list)
+        else:
+            texto += "\n💠 Nenhuma moeda com tendência clara no 1h."
 
         await tg(session, texto)
         print(f"[{now_br()}] RELATÓRIO ENVIADO COM SUCESSO ({tempo}s)")
