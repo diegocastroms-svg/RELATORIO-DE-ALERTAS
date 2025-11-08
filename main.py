@@ -1,5 +1,6 @@
-# main.py — OURO ROTA DIÁRIA (V22.0 — Layout Telegram aprimorado)
-# Mesmo cálculo da V21.9 — apenas layout aprimorado e espaçamento limpo no Telegram
+# main.py — OURO ROTA DIÁRIA V22.2 (EMA9>MA20 Diário)
+# Relatório diário com detecção de reversões e cruzamento EMA9>MA20 no 1D
+# Execução automática no deploy
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -9,7 +10,7 @@ from flask import Flask
 BINANCE_HTTP = "https://api.binance.com"
 TOP_N = 120
 REQ_TIMEOUT = 10
-VERSION = "OURO ROTA DIÁRIA V22.0 — Layout aprimorado Telegram"
+VERSION = "OURO ROTA DIÁRIA V22.2 (EMA9>MA20 Diário)"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -18,7 +19,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} — relatório com layout visual aprimorado", 200
+    return f"{VERSION} — Execução automática no deploy", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -34,115 +35,35 @@ async def tg(session, text: str):
     except Exception as e:
         print(f"[TG ERRO] {e}")
 
-# ---------------- FUNÇÕES DE MÉDIA ----------------
-def ema(values, n):
-    k = 2 / (n + 1)
-    e = values[0]
-    for v in values[1:]:
-        e = v * k + e * (1 - k)
-    return e
+def ema_series(values, period):
+    ema = []
+    k = 2 / (period + 1)
+    for i, v in enumerate(values):
+        if i == 0:
+            ema.append(v)
+        else:
+            ema.append(v * k + ema[-1] * (1 - k))
+    return ema
 
-def ema_series(values, n):
-    k = 2 / (n + 1)
-    e = None
-    out = []
-    for v in values:
-        e = v if e is None else (v * k + e * (1 - k))
-        out.append(e)
-    return out
+def ma_series(values, period):
+    ma = []
+    for i in range(len(values)):
+        if i < period:
+            ma.append(sum(values[:i+1]) / (i+1))
+        else:
+            ma.append(sum(values[i-period+1:i+1]) / period)
+    return ma
 
-# ---------------- TENDÊNCIA 4H ----------------
-def tendencia_4h(candles):
-    try:
-        closes = [float(k[4]) for k in candles if len(k) >= 5]
-        if len(closes) < 100:
-            return False
-
-        ema_vals = ema_series(closes, 9)
-        ma20_vals = [sum(closes[i-20:i]) / 20 for i in range(20, len(closes)+1)]
-
-        diff = len(ema_vals) - len(ma20_vals)
-        if diff > 0:
-            ema_vals = ema_vals[diff:]
-        elif diff < 0:
-            ma20_vals = ma20_vals[-len(ema_vals):]
-
-        e9_prev2, e9_prev, e9_now = ema_vals[-3], ema_vals[-2], ema_vals[-1]
-        ma_prev2, ma_prev, ma_now = ma20_vals[-3], ma20_vals[-2], ma20_vals[-1]
-        price_now = closes[-1]
-
-        cruzou = (e9_prev2 < ma_prev2) and (e9_prev < ma_prev) and (e9_now > ma_now)
-        dist = (e9_now - ma_now) / price_now
-
-        return cruzou and dist > 0.0015
-    except Exception as e:
-        print(f"[tendencia_4h ERRO] {e}")
-        return False
-
-# ---------------- PROBABILIDADE ----------------
-def calc_prob(candles, ch24):
+def calc_prob(candles):
     try:
         closes = [float(k[4]) for k in candles]
-        volumes = [float(k[5]) for k in candles]
-        if len(closes) < 30:
-            return 0.0, "NEUT", 50, "→", "→", "→", "→"
-
-        deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
-        gains = [d if d > 0 else 0 for d in deltas]
-        losses = [-d if d < 0 else 0 for d in deltas]
-        avg_gain = (sum(gains[-14:]) / 14) if sum(gains[-14:]) else 0.001
-        avg_loss = (sum(losses[-14:]) / 14) if sum(losses[-14:]) else 0.001
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-
-        last20 = closes[-25:]
-        ema9_now = ema(last20, 9)
-        ema20_now = ema(last20, 20)
-        prev20 = closes[-26:-1]
-        ema9_prev = ema(prev20, 9)
-        ema_slope = "↗" if (ema9_now - ema9_prev) > 0 else "↘"
-        tendencia = "↑" if ema9_now > ema20_now else "↓"
-
-        vol_med = sum(volumes[-12:]) / 12 if sum(volumes[-12:]) > 0 else 1
-        vol_force = volumes[-1] / vol_med if vol_med > 0 else 1
-        vol_tag = "↑" if vol_force > 1.1 else "↓"
-        mom6 = closes[-1] - closes[-7]
-        mom_tag = "+" if mom6 > 0 else "-"
-
-        regime = "REV" if ch24 <= -3.0 else ("CONT" if ch24 >= 1.0 else "NEUT")
-
-        score = 0.45
-        if regime == "REV":
-            score = 0.50
-            if rsi < 35: score += 0.20
-            if rsi < 25: score += 0.10
-            if ema_slope == "↗": score += 0.10
-            if tendencia == "↑": score += 0.10
-            if vol_force > 1.2: score += 0.10
-            if mom6 > 0: score += 0.10
-            if ch24 < -10: score += 0.08
-            if rsi > 55: score -= 0.10
-        elif regime == "CONT":
-            score = 0.48
-            if 50 <= rsi <= 65: score += 0.10
-            if 65 < rsi <= 75: score += 0.05
-            if tendencia == "↑": score += 0.15
-            if ema_slope == "↗": score += 0.10
-            if vol_force > 1.0: score += 0.05
-            if mom6 > 0: score += 0.10
-            if ch24 > 10: score -= 0.20
-            if ch24 > 20: score -= 0.10
-            if rsi > 75: score -= 0.20
-        else:
-            score = 0.35
-            if tendencia == "↑" and ema_slope == "↗": score += 0.10
-            if 45 <= rsi <= 55: score += 0.05
-
-        score = max(0.05, min(score, 0.95))
-        return float(score), regime, rsi, ema_slope, tendencia, vol_tag, mom_tag
-    except Exception as e:
-        print(f"[calc_prob ERRO] {e}")
-        return 0.0, "NEUT", 0, "→", "→", "→", "→"
+        if len(closes) < 2:
+            return 0
+        diffs = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+        ups = sum(1 for d in diffs if d > 0)
+        return ups / len(diffs)
+    except:
+        return 0
 
 # ---------------- BINANCE ----------------
 async def get_klines(session, symbol, interval="1h", limit=48):
@@ -171,95 +92,79 @@ async def get_top_usdt_symbols(session):
     pares.sort(key=lambda x: x[1], reverse=True)
     return pares[:TOP_N]
 
+# ---------------- FILTRO TENDÊNCIA 1D ----------------
+def tendencia_1d(candles):
+    try:
+        closes = [float(k[4]) for k in candles if len(k) >= 5]
+        if len(closes) < 50:
+            return False
+
+        ema9 = ema_series(closes, 9)
+        ma20 = ma_series(closes, 20)
+
+        e9_prev2, e9_prev, e9_now = ema9[-3], ema9[-2], ema9[-1]
+        m20_prev2, m20_prev, m20_now = ma20[-3], ma20[-2], ma20[-1]
+
+        cruzamento = (e9_prev2 < m20_prev2) and (e9_prev > m20_prev) and (e9_now > m20_now)
+        diferenca = (e9_now - m20_now) / m20_now
+
+        if cruzamento and diferenca > 0.0015:
+            return True
+        return False
+    except Exception as e:
+        print(f"[tendencia_1d ERRO] {e}")
+        return False
+
 # ---------------- RELATÓRIO ----------------
 async def gerar_relatorio():
     async with aiohttp.ClientSession() as session:
-        inicio = time.time()
+        print(f"[{now_br()}] Iniciando geração do relatório...")
         pares = await get_top_usdt_symbols(session)
-
-        reversao, continuacao, tendencia_4h_list = [], [], []
+        resultados = []
+        tendencia_diaria = []
 
         for s, vol, change in pares:
-            kl_1h = await get_klines(session, s, "1h", 60)
-            kl_4h = await get_klines(session, s, "4h", 200)
-            conf_4h = tendencia_4h(kl_4h)
-            prob, regime, rsi, ema_slope, tendencia, vol_tag, mom_tag = calc_prob(kl_1h, change)
-            diario_tag = "📊" if conf_4h else "—"
-            if conf_4h:
-                tendencia_4h_list.append(s)
-            if regime == "REV":
-                reversao.append((s, prob, change, rsi, ema_slope, tendencia, vol_tag, mom_tag, diario_tag))
-            elif regime == "CONT":
-                continuacao.append((s, prob, change, rsi, ema_slope, tendencia, vol_tag, mom_tag, diario_tag))
+            kl = await get_klines(session, s, "1h", 48)
+            kl_1d = await get_klines(session, s, "1d", 100)
 
-        reversao.sort(key=lambda x: x[1], reverse=True)
-        continuacao.sort(key=lambda x: x[1], reverse=True)
+            prob = calc_prob(kl)
+            if tendencia_1d(kl_1d):
+                tendencia_diaria.append(s)
 
-        texto = (
-            f"📊 <b>RELATÓRIO DIÁRIO — OURO ROTA DIÁRIA</b>\n"
-            f"⏰ {now_br()} BR\n\n"
-            "━━━━━━━━━━━━━━━\n"
-            "🔁 <b>Reversão provável (repique após queda)</b>\n"
-            "━━━━━━━━━━━━━━━\n\n"
-        )
+            resultados.append((s, prob, change))
 
-        for s, p, ch, rsi, ema_slope, tendencia, vol_tag, mom_tag, diario_tag in reversao[:10]:
-            texto += (
-                f"⚠️ <b>{s}</b>\n"
-                f"{p*100:.1f}% | {ch:+.2f}% 24h | RSI {rsi:.0f}\n"
-                f"EMA9{ema_slope} | Tend{tendencia} | Vol{vol_tag} | Mom{mom_tag} | {diario_tag}\n"
-                "━━━━━━━━━━━━━━━\n"
-            )
+        resultados.sort(key=lambda x: x[1], reverse=True)
+        altas = resultados[:10]
+        quedas = resultados[-10:]
 
-        texto += (
-            "\n📈 <b>Continuação provável (tendência saudável)</b>\n"
-            "━━━━━━━━━━━━━━━\n\n"
-        )
+        texto = "<b>📊 RELATÓRIO DIÁRIO — OURO ROTA DIÁRIA</b>\n"
+        texto += f"⏰ {now_br()} BR\n\n"
 
-        for s, p, ch, rsi, ema_slope, tendencia, vol_tag, mom_tag, diario_tag in continuacao[:10]:
-            texto += (
-                f"⬆️ <b>{s}</b>\n"
-                f"{p*100:.1f}% | {ch:+.2f}% 24h | RSI {rsi:.0f}\n"
-                f"EMA9{ema_slope} | Tend{tendencia} | Vol{vol_tag} | Mom{mom_tag} | {diario_tag}\n"
-                "━━━━━━━━━━━━━━━\n"
-            )
+        texto += "🔥 <b>Top 10 Probabilidades de Alta:</b>\n"
+        for s, p, ch in altas:
+            direcao = "⬆️" if ch >= 0 else "⚠️"
+            texto += f"{direcao} {s}: {p*100:.1f}% | {ch:+.2f}% 24h\n"
 
-        tempo = round(time.time() - inicio, 1)
-        texto += (
-            f"\n🧾 <b>Resumo técnico</b>\n"
-            "━━━━━━━━━━━━━━━\n"
-            f"🔁 {len(reversao[:10])} reversões fortes detectadas\n"
-            f"📈 {len(continuacao[:10])} continuações confirmadas\n"
-            f"⏱️ Tempo de análise: {tempo}s\n"
-            f"📊 Total analisado: {len(pares)} pares\n\n"
-            f"🟢 Relatório gerado automaticamente no deploy\n"
-        )
+        texto += "\n❄️ <b>Top 10 Probabilidades de Queda:</b>\n"
+        for s, p, ch in quedas:
+            direcao = "⬇️" if ch <= 0 else "⚠️"
+            texto += f"{direcao} {s}: {p*100:.1f}% | {ch:+.2f}% 24h\n"
 
-        texto += (
-            "\n━━━━━━━━━━━━━━━\n"
-            "💠 <b>Moedas com tendência real no 4h</b>\n"
-            "(EMA9>MA20 + 0.15% confirmada):\n"
-            "━━━━━━━━━━━━━━━\n"
-        )
-
-        if tendencia_4h_list:
-            texto += ", ".join(tendencia_4h_list)
+        texto += f"\n📈 <b>Moedas com tendência real no 1D</b> (EMA9>MA20 + 0.15% confirmada):\n"
+        if tendencia_diaria:
+            texto += ", ".join(tendencia_diaria)
         else:
-            texto += "Nenhuma moeda com tendência clara no 4h."
+            texto += "Nenhuma moeda com cruzamento confirmado."
+
+        texto += f"\n\n📊 Total analisado: {len(resultados)} pares\n"
+        texto += f"🟢 Relatório gerado automaticamente no deploy\n"
 
         await tg(session, texto)
-        print(f"[{now_br()}] RELATÓRIO ENVIADO COM SUCESSO ({tempo}s)")
-
-# ---------------- EXECUÇÃO ----------------
-async def agendar_execucao():
-    print(f"[{now_br()}] OURO ROTA DIÁRIA ATIVO — gerando relatório imediato no deploy.")
-    await gerar_relatorio()
-    while True:
-        await asyncio.sleep(3600)
+        print(f"[{now_br()}] RELATÓRIO ENVIADO COM SUCESSO")
 
 # ---------------- MAIN ----------------
 def start_bot():
-    asyncio.run(agendar_execucao())
+    asyncio.run(gerar_relatorio())
 
 if __name__ == "__main__":
     import threading
