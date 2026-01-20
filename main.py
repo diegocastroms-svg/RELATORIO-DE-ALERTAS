@@ -10,6 +10,7 @@ GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID", "").strip()
 API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 DB = "alerts.db"
 
+
 def db_init():
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
@@ -27,11 +28,14 @@ def db_init():
     conn.commit()
     conn.close()
 
+
 def send(text):
-    requests.post(f"{API}/sendMessage", json={
-        "chat_id": GROUP_CHAT_ID,
-        "text": text
-    }, timeout=10)
+    requests.post(
+        f"{API}/sendMessage",
+        json={"chat_id": GROUP_CHAT_ID, "text": text},
+        timeout=10
+    )
+
 
 def parse_and_store(text):
     lines = text.splitlines()
@@ -71,6 +75,7 @@ def parse_and_store(text):
     conn.commit()
     conn.close()
 
+
 def build_report(days=1):
     since = (datetime.utcnow() - timedelta(days=days)).isoformat()
     conn = sqlite3.connect(DB)
@@ -80,8 +85,8 @@ def build_report(days=1):
     total = cur.fetchone()[0]
 
     cur.execute("""
-        SELECT timeframe, COUNT(*) 
-        FROM alerts 
+        SELECT timeframe, COUNT(*)
+        FROM alerts
         WHERE ts >= ?
         GROUP BY timeframe
         ORDER BY COUNT(*) DESC
@@ -89,8 +94,8 @@ def build_report(days=1):
     by_tf = cur.fetchall()
 
     cur.execute("""
-        SELECT symbol, COUNT(*) 
-        FROM alerts 
+        SELECT symbol, COUNT(*)
+        FROM alerts
         WHERE ts >= ?
         GROUP BY symbol
         ORDER BY COUNT(*) DESC
@@ -114,13 +119,15 @@ def build_report(days=1):
 
     return "\n".join(msg)
 
+
 def listener():
     offset = None
     while True:
-        r = requests.get(f"{API}/getUpdates", params={
-            "timeout": 30,
-            "offset": offset
-        }, timeout=35).json()
+        r = requests.get(
+            f"{API}/getUpdates",
+            params={"timeout": 30, "offset": offset},
+            timeout=35
+        ).json()
 
         for u in r.get("result", []):
             offset = u["update_id"] + 1
@@ -146,10 +153,11 @@ def listener():
                     send("Uso: /relatorio | /relatorio hoje | /relatorio 7d")
                 continue
 
-            if text and not text.startswith("/"):
+            if "CRUZAMENTO" in text or "RSI" in text or "TENDÊNCIA" in text:
                 parse_and_store(text)
 
         time.sleep(1)
+
 
 if __name__ == "__main__":
     if not TELEGRAM_TOKEN or not GROUP_CHAT_ID:
@@ -157,4 +165,3 @@ if __name__ == "__main__":
     else:
         db_init()
         listener()
-```0
