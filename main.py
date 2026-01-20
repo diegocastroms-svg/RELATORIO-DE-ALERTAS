@@ -1,162 +1,159 @@
-# main.py — OURO TENDÊNCIAS REAIS (V23.5)
-# Lista todas as moedas com tendência de alta (EMA9 > MA20) em 4H, 1D e 1W
-# Mostra blocos separados e envia direto pro Telegram
-
-import os, asyncio, aiohttp, time
+import os
+import requests
+import sqlite3
+import time
 from datetime import datetime, timedelta
-from flask import Flask
-
-# ---------------- CONFIG ----------------
-BINANCE_HTTP = "https://api.binance.com"
-TOP_N = 150
-REQ_TIMEOUT = 10
-VERSION = "OURO TENDÊNCIAS REAIS (4H, 1D, 1W)"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
-CHAT_ID = os.getenv("CHAT_ID", "").strip()
+GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID", "").strip()
 
-# ---------------- FLASK ----------------
-app = Flask(__name__)
-@app.route("/")
-def home():
-    return f"{VERSION} — relatório de tendências reais (EMA9>MA20)", 200
+API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+DB = "alerts.db"
 
-# ---------------- UTILS ----------------
-def now_br():
-    return (datetime.utcnow() - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
+def db_init():
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT,
+            symbol TEXT,
+            timeframe TEXT,
+            alert_type TEXT,
+            price REAL,
+            raw TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
 
-async def tg(session, text: str):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("[TG] Token ou Chat ID ausente.")
+def send(text):
+    requests.post(f"{API}/sendMessage", json={
+        "chat_id": GROUP_CHAT_ID,
+        "text": text
+    }, timeout=10)
+
+def parse_and_store(text):
+    lines = text.splitlines()
+    if not lines:
         return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        await session.post(
-            url, data={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=REQ_TIMEOUT
-        )
-    except Exception as e:
-        print(f"[TG ERRO] {e}")
 
-# ---------------- MÉDIAS ----------------
-def ema_series(values, n):
-    k = 2 / (n + 1)
-    ema = []
-    e = values[0]
-    for v in values:
-        e = v * k + e * (1 - k)
-        ema.append(e)
-    return ema
+    alert_type = lines[0].strip()
+    symbol = None
+    timeframe = None
+    price = None
 
-def ma_series(values, n):
-    ma = []
-    for i in range(len(values)):
-        if i < n:
-            ma.append(sum(values[:i+1]) / (i+1))
-        else:
-            ma.append(sum(values[i-n+1:i+1]) / n)
-    return ma
+    if "(" in alert_type and ")" in alert_type:
+        timeframe = alert_type.split("(")[-1].replace(")", "").strip()
 
-# ---------------- TENDÊNCIA REAL ----------------
-def em_tendencia_alta(candles):
-    try:
-        closes = [float(k[4]) for k in candles]
-        if len(closes) < 50:
-            return False
+    for l in lines:
+        if l.isupper() and len(l) <= 10:
+            symbol = l.strip()
+        if "Preço" in l or "Preco" in l:
+            try:
+                price = float(l.split(":")[1].strip())
+            except:
+                pass
 
-        ema9 = ema_series(closes, 9)
-        ma20 = ma_series(closes, 20)
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO alerts (ts, symbol, timeframe, alert_type, price, raw)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        datetime.utcnow().isoformat(),
+        symbol,
+        timeframe,
+        alert_type,
+        price,
+        text
+    ))
+    conn.commit()
+    conn.close()
 
-        # Confirmar que EMA9 > MA20 nas últimas 5 velas
-        ult5 = [(ema9[-i] > ma20[-i]) for i in range(1, 6)]
-        tendencia_alta = all(ult5)
+def build_report(days=1):
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
 
-        # Confirmar inclinação positiva (EMA9 subindo)
-        inclinacao = ema9[-1] > ema9[-3]
+    cur.execute("SELECT COUNT(*) FROM alerts WHERE ts >= ?", (since,))
+    total = cur.fetchone()[0]
 
-        return tendencia_alta and inclinacao
-    except:
-        return False
+    cur.execute("""
+        SELECT timeframe, COUNT(*) 
+        FROM alerts 
+        WHERE ts >= ?
+        GROUP BY timeframe
+        ORDER BY COUNT(*) DESC
+    """, (since,))
+    by_tf = cur.fetchall()
 
-# ---------------- BINANCE ----------------
-async def get_klines(session, symbol, interval="4h", limit=200):
-    url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    try:
-        async with session.get(url, timeout=REQ_TIMEOUT) as r:
-            return await r.json()
-    except:
-        return []
+    cur.execute("""
+        SELECT symbol, COUNT(*) 
+        FROM alerts 
+        WHERE ts >= ?
+        GROUP BY symbol
+        ORDER BY COUNT(*) DESC
+        LIMIT 10
+    """, (since,))
+    top = cur.fetchall()
 
-async def get_top_usdt_symbols(session):
-    url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
-    async with session.get(url, timeout=REQ_TIMEOUT) as r:
-        data = await r.json()
-    blocked = ("UP","DOWN","BULL","BEAR","BUSD","FDUSD","TUSD","USDC","EUR","BRL","PERP","TEST","USDE")
-    pares = []
-    for d in data:
-        s = d.get("symbol", "")
-        if not s.endswith("USDT"):
-            continue
-        if any(x in s for x in blocked):
-            continue
-        qv = float(d.get("quoteVolume", 0) or 0)
-        pares.append((s, qv))
-    pares.sort(key=lambda x: x[1], reverse=True)
-    return [p[0] for p in pares[:TOP_N]]
+    conn.close()
 
-# ---------------- RELATÓRIO ----------------
-async def gerar_relatorio():
-    async with aiohttp.ClientSession() as session:
-        inicio = time.time()
-        pares = await get_top_usdt_symbols(session)
+    msg = [f"📊 RELATÓRIO ({days}d)", f"Total: {total}"]
 
-        tendencia_4h, tendencia_1d, tendencia_1w = [], [], []
+    if by_tf:
+        msg.append("\n⏱ Timeframes:")
+        for tf, c in by_tf:
+            msg.append(f"- {tf}: {c}")
 
-        for s in pares:
-            kl_4h = await get_klines(session, s, "4h", 200)
-            kl_1d = await get_klines(session, s, "1d", 200)
-            kl_1w = await get_klines(session, s, "1w", 200)
+    if top:
+        msg.append("\n🏷 Top moedas:")
+        for s, c in top:
+            msg.append(f"- {s}: {c}")
 
-            if em_tendencia_alta(kl_4h):
-                tendencia_4h.append(s)
-            if em_tendencia_alta(kl_1d):
-                tendencia_1d.append(s)
-            if em_tendencia_alta(kl_1w):
-                tendencia_1w.append(s)
+    return "\n".join(msg)
 
-        tempo = round(time.time() - inicio, 1)
-        texto = (
-            f"<b>📊 OURO TENDÊNCIAS REAIS</b>\n"
-            f"⏰ {now_br()} BR\n"
-            f"🟢 Critério: EMA9 acima da MA20 nas últimas 5 velas + inclinação positiva\n"
-            f"📈 Total analisado: {len(pares)} pares\n\n"
-        )
-
-        texto += "━━━━━━━━━━━━━━━\n📉 <b>TENDÊNCIA 4H</b>\n━━━━━━━━━━━━━━━\n"
-        texto += ", ".join(tendencia_4h) if tendencia_4h else "Nenhuma moeda em tendência no 4h."
-
-        texto += "\n\n━━━━━━━━━━━━━━━\n📊 <b>TENDÊNCIA 1D</b>\n━━━━━━━━━━━━━━━\n"
-        texto += ", ".join(tendencia_1d) if tendencia_1d else "Nenhuma moeda em tendência no 1D."
-
-        texto += "\n\n━━━━━━━━━━━━━━━\n🕒 <b>TENDÊNCIA 1W (Semanal)</b>\n━━━━━━━━━━━━━━━\n"
-        texto += ", ".join(tendencia_1w) if tendencia_1w else "Nenhuma moeda em tendência semanal."
-
-        texto += f"\n\n⏱️ Tempo de análise: {tempo}s\n🟢 Relatório gerado automaticamente no deploy"
-
-        await tg(session, texto)
-        print(f"[{now_br()}] RELATÓRIO ENVIADO COM SUCESSO ({tempo}s)")
-
-# ---------------- EXECUÇÃO ----------------
-async def agendar_execucao():
-    print(f"[{now_br()}] OURO TENDÊNCIAS REAIS ATIVO — Gerando relatório imediato.")
-    await gerar_relatorio()
+def listener():
+    offset = None
     while True:
-        await asyncio.sleep(3600)
+        r = requests.get(f"{API}/getUpdates", params={
+            "timeout": 30,
+            "offset": offset
+        }, timeout=35).json()
 
-# ---------------- MAIN ----------------
-def start_bot():
-    asyncio.run(agendar_execucao())
+        for u in r.get("result", []):
+            offset = u["update_id"] + 1
+            msg = u.get("message", {})
+            chat_id = msg.get("chat", {}).get("id")
+            text = msg.get("text", "")
+
+            if str(chat_id) != str(GROUP_CHAT_ID):
+                continue
+
+            if text.startswith("/relatorio"):
+                parts = text.split()
+                if len(parts) == 1:
+                    send(build_report(1))
+                elif len(parts) >= 2 and parts[1] == "hoje":
+                    send(build_report(1))
+                elif len(parts) >= 2 and parts[1].endswith("d"):
+                    try:
+                        send(build_report(int(parts[1][:-1])))
+                    except:
+                        send("Uso: /relatorio | /relatorio hoje | /relatorio 7d")
+                else:
+                    send("Uso: /relatorio | /relatorio hoje | /relatorio 7d")
+                continue
+
+            if "CRUZAMENTO" in text or "RSI" in text:
+                parse_and_store(text)
+
+        time.sleep(1)
 
 if __name__ == "__main__":
-    import threading
-    threading.Thread(target=start_bot, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    if not TELEGRAM_TOKEN or not GROUP_CHAT_ID:
+        print("FALTANDO ENV: TELEGRAM_TOKEN e/ou GROUP_CHAT_ID")
+    else:
+        db_init()
+        listener()
