@@ -146,7 +146,7 @@ def listener():
                     send("Uso: /relatorio | /relatorio hoje | /relatorio 7d")
                 continue
 
-            if "CRUZAMENTO" in text or "RSI" in text:
+            if text and not text.startswith("/"):
                 parse_and_store(text)
 
         time.sleep(1)
@@ -157,3 +157,4 @@ if __name__ == "__main__":
     else:
         db_init()
         listener()
+```0
