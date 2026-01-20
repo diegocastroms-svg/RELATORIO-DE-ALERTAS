@@ -2,7 +2,9 @@ import os
 import requests
 import sqlite3
 import time
+import re
 from datetime import datetime, timedelta
+from openpyxl import Workbook
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID", "").strip()
@@ -19,6 +21,7 @@ def db_init():
             ts TEXT,
             symbol TEXT,
             timeframe TEXT,
+            alert_key TEXT,
             alert_type TEXT,
             price REAL,
             raw TEXT
@@ -26,14 +29,12 @@ def db_init():
     """)
     conn.commit()
 
-    # ===== CORRECAO: adicionar coluna para hora do alerta =====
     try:
         cur.execute("ALTER TABLE alerts ADD COLUMN alert_time TEXT")
         conn.commit()
     except:
         pass
 
-    # ===== CORRECAO: adicionar coluna para RSI =====
     try:
         cur.execute("ALTER TABLE alerts ADD COLUMN rsi REAL")
         conn.commit()
@@ -42,11 +43,98 @@ def db_init():
 
     conn.close()
 
-def send(text):
-    requests.post(f"{API}/sendMessage", json={
-        "chat_id": GROUP_CHAT_ID,
-        "text": text
-    }, timeout=10)
+def send_excel(filepath, filename, caption):
+    with open(filepath, "rb") as f:
+        requests.post(
+            f"{API}/sendDocument",
+            data={
+                "chat_id": GROUP_CHAT_ID,
+                "caption": caption
+            },
+            files={
+                "document": (filename, f, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            },
+            timeout=60
+        )
+
+def norm_tf(tf):
+    if not tf:
+        return None
+    t = tf.strip().upper().replace(" ", "")
+    t = t.replace("MIN", "M").replace("HRS", "H").replace("HR", "H")
+    return t
+
+def extract_timeframe(first_line, full_text):
+    if "(" in first_line and ")" in first_line:
+        tf = first_line.split("(")[-1].replace(")", "").strip()
+        return norm_tf(tf)
+
+    m = re.search(r"\b(\d{1,2})(M|H|D)\b", first_line.upper())
+    if m:
+        return norm_tf(m.group(1) + m.group(2))
+
+    m2 = re.search(r"\b(\d{1,2})(M|H|D)\b", full_text.upper())
+    if m2:
+        return norm_tf(m2.group(1) + m2.group(2))
+
+    return None
+
+def extract_hour(lines):
+    for l in lines:
+        ll = l.strip()
+        if ll.startswith("Hora:") or "Hora:" in ll:
+            try:
+                return ll.split("Hora:", 1)[1].strip()
+            except:
+                return None
+    return None
+
+def extract_rsi(first_line, lines):
+    rsi = None
+
+    # exemplo: "RSI 1H < 35"
+    if "RSI" in first_line.upper() and "<" in first_line:
+        try:
+            v = first_line.split("<", 1)[1].strip()
+            rsi = float(v)
+        except:
+            pass
+
+    # exemplo: "RSI: 27.66"
+    if rsi is None:
+        for l in lines:
+            ll = l.strip()
+            if "RSI" in ll and ":" in ll:
+                try:
+                    val = ll.split(":", 1)[1].strip()
+                    rsi = float(val)
+                    break
+                except:
+                    pass
+
+    return rsi
+
+def classify_alert(first_line, full_text):
+    t = first_line.upper().strip()
+
+    if t.startswith("CRUZAMENTO MA200"):
+        return "CRUZAMENTO"
+
+    if t.startswith("RSI"):
+        return "RSI"
+
+    if "TENDÊNCIA LONGA" in t or "TENDENCIA LONGA" in t:
+        return "TENDENCIA"
+
+    body = full_text.upper()
+    if "CRUZAMENTO" in body and "MA200" in body:
+        return "CRUZAMENTO"
+    if body.startswith("RSI") or "\nRSI" in body:
+        return "RSI"
+    if "TENDÊNCIA LONGA" in body or "TENDENCIA LONGA" in body:
+        return "TENDENCIA"
+
+    return "OUTROS"
 
 def parse_and_store(text):
     lines = text.splitlines()
@@ -54,29 +142,19 @@ def parse_and_store(text):
         return
 
     alert_type = lines[0].strip()
+
+    alert_key = classify_alert(alert_type, text)
+    timeframe = extract_timeframe(alert_type, text)
+    alert_time = extract_hour(lines)
+    rsi = extract_rsi(alert_type, lines)
+
     symbol = None
-    timeframe = None
     price = None
-
-    # ===== CORRECAO =====
-    alert_time = None
-    rsi = None
-
-    # tenta timeframe por (15M) etc
-    if "(" in alert_type and ")" in alert_type:
-        timeframe = alert_type.split("(")[-1].replace(")", "").strip()
-
-    # se for RSI (ex: "RSI 1H < 35") tenta pegar timeframe do titulo
-    if timeframe is None and "RSI" in alert_type:
-        for tf in ["15M", "1H", "4H", "12H", "1D"]:
-            if tf in alert_type.upper():
-                timeframe = tf
-                break
 
     for l in lines:
         ll = l.strip()
 
-        if ll.isupper() and len(ll) <= 10:
+        if ll.isupper() and len(ll) <= 12 and ll.isalpha():
             symbol = ll
 
         if "Preço" in ll or "Preco" in ll:
@@ -85,40 +163,16 @@ def parse_and_store(text):
             except:
                 pass
 
-        # exemplos: "Hora: 11:16:48 BR"
-        if ll.startswith("Hora:") or "Hora:" in ll:
-            try:
-                alert_time = ll.split("Hora:", 1)[1].strip()
-            except:
-                pass
-
-        # exemplos: "RSI: 27.66" / "RSI (1D): 25.53"
-        if "RSI" in ll and ":" in ll:
-            try:
-                val = ll.split(":", 1)[1].strip()
-                rsi = float(val)
-            except:
-                pass
-
-    # se ainda não pegou timeframe, tenta achar em qualquer linha
-    if timeframe is None:
-        for tf in ["15M", "1H", "4H", "12H", "1D"]:
-            for l in lines:
-                if tf in l.upper():
-                    timeframe = tf
-                    break
-            if timeframe is not None:
-                break
-
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO alerts (ts, symbol, timeframe, alert_type, price, raw, alert_time, rsi)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO alerts (ts, symbol, timeframe, alert_key, alert_type, price, raw, alert_time, rsi)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         datetime.utcnow().isoformat(),
         symbol,
         timeframe,
+        alert_key,
         alert_type,
         price,
         text,
@@ -128,38 +182,98 @@ def parse_and_store(text):
     conn.commit()
     conn.close()
 
-def build_report(days=1):
+def build_report_excel(days=1, alert_key=None, tf_filter=None):
     since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
 
-    cur.execute("SELECT COUNT(*) FROM alerts WHERE ts >= ?", (since,))
-    total = cur.fetchone()[0]
+    where = ["ts >= ?"]
+    params = [since]
 
-    # ===== CORRECAO: ultimos alertas com moeda/timeframe/rsi/hora =====
-    cur.execute("""
-        SELECT symbol, timeframe, rsi, alert_time, ts, alert_type
+    if alert_key:
+        where.append("alert_key = ?")
+        params.append(alert_key)
+
+    if tf_filter:
+        where.append("timeframe = ?")
+        params.append(tf_filter)
+
+    where_sql = " AND ".join(where)
+
+    cur.execute(f"""
+        SELECT symbol, timeframe, rsi, alert_time, alert_key
         FROM alerts
-        WHERE ts >= ?
+        WHERE {where_sql}
         ORDER BY id DESC
-        LIMIT 10
-    """, (since,))
-    last = cur.fetchall()
+    """, tuple(params))
+    rows = cur.fetchall()
 
     conn.close()
 
-    msg = [f"📊 RELATÓRIO ({days}d)", f"Total: {total}"]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Alertas"
+    ws.append(["MOEDA", "TIMEFRAME", "RSI", "HORA", "TIPO"])
 
-    if last:
-        msg.append("\n🧾 Últimos alertas:")
-        for sym, tf, r, a_time, ts, a_type in last:
-            moeda = sym if sym else "None"
-            timeframe = tf if tf else "None"
-            rsi_txt = f"{r:.2f}" if isinstance(r, (int, float)) else "None"
-            hora = a_time if a_time else ts
-            msg.append(f"- {hora} | {moeda} | {timeframe} | RSI: {rsi_txt} | {a_type}")
+    for sym, tf, r, h, k in rows:
+        moeda = sym if sym else ""
+        timeframe = tf if tf else ""
+        rsi_val = r if isinstance(r, (int, float)) else ""
+        hora = h if h else ""
+        tipo = k if k else ""
+        ws.append([moeda, timeframe, rsi_val, hora, tipo])
 
-    return "\n".join(msg)
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    name_key = alert_key if alert_key else "ALL"
+    name_tf = tf_filter if tf_filter else "ALL"
+    filename = f"relatorio_{days}d_{name_key}_{name_tf}_{stamp}.xlsx"
+    wb.save(filename)
+    return filename
+
+def parse_relatorio_cmd(text):
+    # Aceita:
+    # /relatorio
+    # /relatorio rsi
+    # /relatorio rsi 4h 2d
+    # /relatorio cruzamento 15m hoje
+    # /relatorio tendencia 1d 7d
+    parts = text.strip().split()
+    days = 1
+    tf = None
+    key = None
+
+    for p in parts[1:]:
+        pl = p.lower().strip()
+
+        if pl == "hoje":
+            days = 1
+            continue
+
+        if pl.endswith("d"):
+            try:
+                days = int(pl[:-1])
+            except:
+                pass
+            continue
+
+        if re.match(r"^\d{1,2}(m|h|d)$", pl):
+            tf = norm_tf(pl)
+            continue
+
+        if pl in ["rsi"]:
+            key = "RSI"
+            continue
+
+        if pl in ["cruzamento", "ma200"]:
+            key = "CRUZAMENTO"
+            continue
+
+        if pl in ["tendencia", "tendência", "longa", "tendencia_longa", "tendência_longa"]:
+            key = "TENDENCIA"
+            continue
+
+    return days, key, tf
 
 def listener():
     offset = None
@@ -179,21 +293,19 @@ def listener():
                 continue
 
             if text.startswith("/relatorio"):
-                parts = text.split()
-                if len(parts) == 1:
-                    send(build_report(1))
-                elif len(parts) >= 2 and parts[1] == "hoje":
-                    send(build_report(1))
-                elif len(parts) >= 2 and parts[1].endswith("d"):
-                    try:
-                        send(build_report(int(parts[1][:-1])))
-                    except:
-                        send("Uso: /relatorio | /relatorio hoje | /relatorio 7d")
-                else:
-                    send("Uso: /relatorio | /relatorio hoje | /relatorio 7d")
+                days, key, tf = parse_relatorio_cmd(text)
+                filepath = build_report_excel(days, alert_key=key, tf_filter=tf)
+
+                caption = f"📎 Relatório ({days}d)"
+                if key:
+                    caption += f" — {key}"
+                if tf:
+                    caption += f" — {tf}"
+
+                send_excel(filepath, filepath, caption)
                 continue
 
-            if "CRUZAMENTO" in text or "RSI" in text:
+            if text and not text.startswith("/"):
                 parse_and_store(text)
 
         time.sleep(1)
