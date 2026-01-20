@@ -1,2 +1,2 @@
-aiohttp
-flask
+requests
+python-telegram-bot
